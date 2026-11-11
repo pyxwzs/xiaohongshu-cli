@@ -33,6 +33,15 @@ FAKE_NOTE_RESPONSE = {
 class TestCliBasic:
     """Test CLI basics without requiring cookies."""
 
+    @pytest.fixture(autouse=True)
+    def isolate_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_MEMORY", None)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_PATH", None)
+        from xhs_cli.cookies import set_active_account
+
+        set_active_account(None)
+
     def test_version(self):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
@@ -66,7 +75,7 @@ class TestCliBasic:
         result = runner.invoke(cli, ["--help"])
         commands_expected = [
             # Auth
-            "login", "status", "logout", "whoami",
+            "login", "status", "logout", "whoami", "accounts", "account",
             # Reading
             "search", "read", "comments", "sub-comments", "user", "user-posts",
             "feed", "hot", "topics", "search-user", "my-notes",
@@ -98,8 +107,9 @@ class TestCliBasic:
         result = runner.invoke(cli, ["my-notes", "--help"])
         assert result.exit_code == 0
 
-    def test_status_auto_yaml_when_stdout_is_not_tty(self, monkeypatch):
+    def test_status_auto_yaml_when_stdout_is_not_tty(self, monkeypatch, tmp_path):
         monkeypatch.setenv("OUTPUT", "auto")
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(
             "xhs_cli.commands.auth.run_client_action",
             lambda ctx, action: {"nickname": "Alice", "red_id": "alice001"},
@@ -114,8 +124,9 @@ class TestCliBasic:
         assert payload["data"]["authenticated"] is True
         assert payload["data"]["user"]["name"] == "Alice"
 
-    def test_whoami_auto_yaml_when_stdout_is_not_tty(self, monkeypatch):
+    def test_whoami_auto_yaml_when_stdout_is_not_tty(self, monkeypatch, tmp_path):
         monkeypatch.setenv("OUTPUT", "auto")
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
         monkeypatch.setattr(
             "xhs_cli.commands.auth.run_client_action",
             lambda ctx, action: {"nickname": "Alice", "red_id": "alice001", "user_id": "u-1"},

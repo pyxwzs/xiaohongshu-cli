@@ -1,30 +1,44 @@
 """QR code login for Xiaohongshu.
 
 Supports two backends:
-1. Browser-assisted login via Camoufox.  The browser performs the real
-   QR completion flow, while the CLI renders the QR code in the terminal
-   from the browser's ``qrcode/create`` response and exports cookies after
-   login succeeds.
-2. Legacy pure-HTTP login flow.  This remains as a fallback when the
-   browser backend is unavailable.
+1. Local Chrome via Selenium.  The login page opens in the installed Chrome
+   (with system fonts) and cookies are exported after the QR scan succeeds.
+2. Legacy pure-HTTP login flow.  This remains as a fallback when Chrome or
+   Selenium cannot be started.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import platform
 import random
+import re
+import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+import zipfile
+from pathlib import Path
 from typing import Any
 
 from .client import XhsClient
-from .cookies import save_cookies
+from .cookies import get_config_dir, save_cookies
 from .exceptions import NeedVerifyError, XhsApiError
 
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.xiaohongshu.com/login"
+CHROMEDRIVER_INDEX_URL = (
+    "https://cdn.npmmirror.com/binaries/chrome-for-testing/known-good-versions-with-downloads.json"
+)
+CHROMEDRIVER_MIRROR_TEMPLATES = (
+    "https://cdn.npmmirror.com/binaries/chrome-for-testing/{version}/{platform}/{archive}",
+    "https://registry.npmmirror.com/-/binary/chrome-for-testing/{version}/{platform}/{archive}",
+)
+GITHUB_PROXY_PREFIX = "https://v6.gh-proxy.org/"
 QR_CREATE_ENDPOINT = "/api/sns/web/v1/login/qrcode/create"
 QR_USERINFO_ENDPOINT = "/api/qrcode/userinfo"
 QR_STATUS_ENDPOINT = "/api/sns/web/v1/login/qrcode/status"
@@ -310,6 +324,49 @@ def _display_qr_in_terminal(data: str) -> bool:
     return True
 
 
+def _github_proxy_url(url: str) -> str:
+    """Route GitHub file downloads through the gh-proxy mirror."""
+    if url.startswith(GITHUB_PROXY_PREFIX):
+        return url
+    if url.startswith("https://github.com/"):
+        return GITHUB_PROXY_PREFIX + url
+    return url
+
+
+def _install_github_download_proxy() -> None:
+    """Send Camoufox's GitHub package download through the mirror."""
+    import requests
+    from camoufox import pkgman
+
+    if getattr(pkgman, "_xhs_gh_proxy", False):
+        return
+
+    original_request = requests.sessions.Session.request
+
+    def request(self, method, url, *args, **kwargs):
+        if not isinstance(url, str):
+            return original_request(self, method, url, *args, **kwargs)
+        return original_request(self, method, _github_proxy_url(url), *args, **kwargs)
+
+    requests.sessions.Session.request = request  # type: ignore[method-assign]
+
+    original_webdl = pkgman.webdl
+
+    def webdl(url, *args, **kwargs):
+        if isinstance(url, str):
+            url = _github_proxy_url(url)
+        return original_webdl(url, *args, **kwargs)
+
+    def download_file(file, url):
+        proxied = _github_proxy_url(url) if isinstance(url, str) else url
+        pkgman.rprint(f"Downloading package: {proxied}")
+        return original_webdl(proxied, buffer=file)
+
+    pkgman.webdl = webdl
+    pkgman.CamoufoxFetcher.download_file = staticmethod(download_file)
+    pkgman._xhs_gh_proxy = True
+
+
 def _ensure_camoufox_ready() -> None:
     """Validate that the Camoufox package and browser binary are available."""
     try:
@@ -343,6 +400,7 @@ def _browser_assisted_qrcode_login(
     timeout_s: int = POLL_TIMEOUT_S,
 ) -> dict[str, str]:
     """Log in by letting a real browser complete the QR flow, then export cookies."""
+    _install_github_download_proxy()
     _ensure_camoufox_ready()
 
     try:
@@ -532,6 +590,210 @@ def _http_qrcode_login(
     raise XhsApiError("QR code login timed out after 4 minutes")
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.split("."):
+        digits = re.match(r"\d+", piece)
+        parts.append(int(digits.group(0)) if digits else 0)
+    return tuple(parts)
+
+
+def _chromedriver_platform() -> str:
+    machine = platform.machine().lower()
+    if sys.platform == "darwin":
+        return "mac-arm64" if machine in {"arm64", "aarch64"} else "mac-x64"
+    if sys.platform.startswith("linux"):
+        return "linux64"
+    if sys.platform == "win32":
+        return "win64" if machine in {"amd64", "x86_64", "arm64", "aarch64"} else "win32"
+    raise BrowserQrLoginUnavailable(f"当前系统不支持自动准备 ChromeDriver: {sys.platform}")
+
+
+def _chrome_binary() -> Path:
+    candidates = [
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+        Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    raise BrowserQrLoginUnavailable("没有找到本机 Chrome。请先安装 Google Chrome。")
+
+
+def _chrome_version(binary: Path) -> str:
+    try:
+        completed = subprocess.run(
+            [str(binary), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BrowserQrLoginUnavailable(f"无法读取 Chrome 版本: {exc}") from exc
+    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", completed.stdout)
+    if not match:
+        raise BrowserQrLoginUnavailable(f"无法解析 Chrome 版本: {completed.stdout.strip()}")
+    return match.group(1)
+
+
+def _select_chromedriver_version(chrome_version: str, available: list[str]) -> str:
+    """Pick the newest ChromeDriver that is not newer than the installed Chrome."""
+    chrome_key = _version_key(chrome_version)
+    same_major = [version for version in available if _version_key(version)[:1] == chrome_key[:1]]
+    not_newer = [version for version in same_major if _version_key(version) <= chrome_key]
+    pool = not_newer or same_major
+    if not pool:
+        raise BrowserQrLoginUnavailable(f"国内镜像没有 Chrome {chrome_version} 对应的 ChromeDriver。")
+    return max(pool, key=_version_key)
+
+
+def _chromedriver_versions(platform_name: str) -> list[str]:
+    request = urllib.request.Request(CHROMEDRIVER_INDEX_URL, headers={"User-Agent": "xiaohongshu-cli"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        raise BrowserQrLoginUnavailable(f"无法从国内镜像读取 ChromeDriver 版本列表: {exc}") from exc
+    versions: list[str] = []
+    for item in payload.get("versions", []):
+        downloads = item.get("downloads", {}).get("chromedriver", [])
+        if any(platform_name in entry.get("url", "") for entry in downloads):
+            version = str(item.get("version", ""))
+            if version:
+                versions.append(version)
+    return versions
+
+
+def _download_chromedriver(version: str, platform_name: str, destination: Path) -> None:
+    archive_name = f"chromedriver-{platform_name}.zip"
+    binary_name = "chromedriver.exe" if platform_name.startswith("win") else "chromedriver"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for template in CHROMEDRIVER_MIRROR_TEMPLATES:
+        url = template.format(version=version, platform=platform_name, archive=archive_name)
+        tmp_zip = destination.parent / f"{archive_name}.partial"
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "xiaohongshu-cli"})
+            with urllib.request.urlopen(request, timeout=120) as response, tmp_zip.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+            with zipfile.ZipFile(tmp_zip) as archive:
+                member = next(
+                    (name for name in archive.namelist() if Path(name).name == binary_name),
+                    None,
+                )
+                if member is None:
+                    raise BrowserQrLoginUnavailable(f"压缩包里没有 {binary_name}")
+                extracted = destination.with_suffix(".download")
+                extracted.write_bytes(archive.read(member))
+                extracted.chmod(0o755)
+                extracted.replace(destination)
+            return
+        except (OSError, urllib.error.URLError, zipfile.BadZipFile, TimeoutError) as exc:
+            errors.append(f"{url}: {exc}")
+        finally:
+            tmp_zip.unlink(missing_ok=True)
+    detail = "; ".join(errors) or "未知错误"
+    raise BrowserQrLoginUnavailable(f"ChromeDriver 下载失败: {detail}")
+
+
+def _ensure_chromedriver(
+    *,
+    on_status: callable[[str], None] | None = None,
+) -> tuple[Path, Path]:
+    """Return the local Chrome binary and a matching ChromeDriver from the CN mirror."""
+    binary = _chrome_binary()
+    chrome_version = _chrome_version(binary)
+    platform_name = _chromedriver_platform()
+    binary_name = "chromedriver.exe" if platform_name.startswith("win") else "chromedriver"
+    cached_root = get_config_dir() / "drivers"
+    cached = sorted(cached_root.glob(f"chromedriver-*-{platform_name}/{binary_name}"))
+    cached_versions = [
+        path.parent.name.removeprefix("chromedriver-").removesuffix(f"-{platform_name}")
+        for path in cached
+    ]
+    compatible = [
+        version
+        for version in cached_versions
+        if _version_key(version)[:1] == _version_key(chrome_version)[:1]
+        and _version_key(version) <= _version_key(chrome_version)
+    ]
+    if compatible:
+        chosen = max(compatible, key=_version_key)
+        return binary, cached_root / f"chromedriver-{chosen}-{platform_name}" / binary_name
+
+    _emit_status(on_status, f"正在从国内镜像匹配 Chrome {chrome_version} 的驱动...")
+    chosen = _select_chromedriver_version(chrome_version, _chromedriver_versions(platform_name))
+    driver_path = cached_root / f"chromedriver-{chosen}-{platform_name}" / binary_name
+    if not driver_path.is_file():
+        _emit_status(on_status, f"正在下载 ChromeDriver {chosen}...")
+        _download_chromedriver(chosen, platform_name, driver_path)
+    return binary, driver_path
+
+
+def _cookies_from_selenium(raw_cookies: list[dict[str, Any]]) -> dict[str, str]:
+    """Keep Xiaohongshu cookies exported by Selenium."""
+    return _normalize_browser_cookies(raw_cookies)
+
+
+def _selenium_qrcode_login(
+    *,
+    on_status: callable[[str], None] | None = None,
+    timeout_s: int = POLL_TIMEOUT_S,
+) -> dict[str, str]:
+    """Open the login page in the installed Chrome and export cookies after scanning."""
+    try:
+        from selenium import webdriver
+        from selenium.common.exceptions import WebDriverException
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+    except ImportError as exc:
+        raise BrowserQrLoginUnavailable(
+            "扫码登录需要 selenium。请先执行: pip install selenium"
+        ) from exc
+
+    chrome_binary, driver_path = _ensure_chromedriver(on_status=on_status)
+    options = Options()
+    options.binary_location = str(chrome_binary)
+    options.add_argument("--lang=zh-CN")
+    options.add_experimental_option("prefs", {"intl.accept_languages": "zh-CN,zh"})
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    service = Service(executable_path=str(driver_path))
+
+    _emit_status(on_status, "正在启动本机 Chrome...")
+    try:
+        driver = webdriver.Chrome(service=service, options=options)
+    except WebDriverException as exc:
+        raise BrowserQrLoginUnavailable(f"无法启动本机 Chrome: {exc}") from exc
+
+    try:
+        _emit_status(on_status, "正在用本机 Chrome 打开小红书登录页，请在窗口里用 App 扫码。")
+        driver.get(LOGIN_URL)
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            cookies = _cookies_from_selenium(driver.get_cookies())
+            current_url = driver.current_url or ""
+            logged_in = bool(cookies.get("a1") and cookies.get("web_session")) and (
+                "/login" not in current_url or bool(cookies.get("id_token"))
+            )
+            if logged_in:
+                save_cookies(cookies)
+                _emit_status(on_status, "登录成功，Cookie 已保存。")
+                return cookies
+            time.sleep(POLL_INTERVAL_S)
+    finally:
+        driver.quit()
+
+    raise XhsApiError("扫码登录超时。请重新执行 xhs login --qrcode")
+
+
 def qrcode_login(
     *,
     on_status: callable[[str], None] | None = None,
@@ -541,8 +803,8 @@ def qrcode_login(
     """Run the QR code login flow."""
     if prefer_browser_assisted:
         try:
-            return _browser_assisted_qrcode_login(on_status=on_status, timeout_s=timeout_s)
+            return _selenium_qrcode_login(on_status=on_status, timeout_s=timeout_s)
         except BrowserQrLoginUnavailable as exc:
-            logger.info("Browser-assisted QR login unavailable, falling back to HTTP flow: %s", exc)
+            logger.info("Selenium Chrome login unavailable, falling back to HTTP flow: %s", exc)
 
     return _http_qrcode_login(on_status=on_status, timeout_s=timeout_s)

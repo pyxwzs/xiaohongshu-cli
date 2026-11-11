@@ -102,8 +102,11 @@ class TestTransportCookies:
 
 
 class TestReadingEndpointBehavior:
-    def test_get_note_detail_prefers_cached_xsec_source(self, monkeypatch):
+    def test_get_note_detail_prefers_cached_xsec_source(self, monkeypatch, tmp_path):
         captured = {}
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_MEMORY", None)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_PATH", None)
 
         def fake_get_note_by_id(self, note_id, xsec_token="", xsec_source="pc_feed"):
             captured["note_id"] = note_id
@@ -126,11 +129,12 @@ class TestReadingEndpointBehavior:
             "source": "pc_search",
         }
 
-    def test_search_notes_uses_browser_like_prewarm_sequence(self, monkeypatch):
+    def test_search_notes_uses_browser_like_prewarm_sequence(self, monkeypatch, tmp_path):
         calls = []
-
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
         monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
-        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", False)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_PATH", None)
 
         def fake_get(self, uri, params=None):
             calls.append(("GET", uri, params))
@@ -163,11 +167,13 @@ class TestReadingEndpointBehavior:
         assert notes_payload["filters"][0]["type"] == "sort_type"
         assert notes_payload["filters"][1]["type"] == "filter_note_type"
 
-    def test_search_notes_reuses_search_id_across_pages(self, monkeypatch):
+    def test_search_notes_reuses_search_id_across_pages(self, monkeypatch, tmp_path):
         calls = []
 
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
         monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
-        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", True)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", False)
+        monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_PATH", None)
 
         def fake_get(self, uri, params=None):
             calls.append(("GET", uri, params))
@@ -204,7 +210,7 @@ class TestReadingEndpointBehavior:
         first_calls = []
         second_calls = []
 
-        monkeypatch.setattr("xhs_cli.client_mixins.get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
         monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE", OrderedDict())
         monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_LOADED", False)
         monkeypatch.setattr("xhs_cli.client_mixins._SEARCH_SESSION_CACHE_PATH", None)
@@ -256,7 +262,10 @@ class TestReadingEndpointBehavior:
         assert first_notes_call[2]["search_id"] == second_notes_call[2]["search_id"]
         assert [call[1] for call in second_calls] == ["/api/sns/web/v1/search/notes"]
 
-    def test_get_note_detail_invalidates_cached_context_after_feed_failure(self, monkeypatch):
+    def test_get_note_detail_invalidates_cached_context_after_feed_failure(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("xhs_cli.cookies.get_config_dir", lambda: tmp_path)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_MEMORY", None)
+        monkeypatch.setattr("xhs_cli.cookies._TOKEN_CACHE_PATH", None)
         cache_note_context("note-123", "stale-token", "pc_search")
 
         def fake_get_note_by_id(self, note_id, xsec_token="", xsec_source="pc_feed"):

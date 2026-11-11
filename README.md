@@ -1,6 +1,6 @@
 # xiaohongshu-cli
 
-[![CI](https://github.com/jackwener/xiaohongshu-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/jackwener/xiaohongshu-cli/actions/workflows/ci.yml)
+[![CI](https://github.com/pyxwzs/xiaohongshu-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pyxwzs/xiaohongshu-cli/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/xiaohongshu-cli.svg)](https://pypi.org/project/xiaohongshu-cli/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue.svg)](https://pypi.org/project/xiaohongshu-cli/)
 
@@ -54,7 +54,7 @@ uv tool upgrade xiaohongshu-cli
 From source:
 
 ```bash
-git clone git@github.com:jackwener/xiaohongshu-cli.git
+git clone https://github.com/pyxwzs/xiaohongshu-cli.git
 cd xiaohongshu-cli
 uv sync
 ```
@@ -144,6 +144,44 @@ xhs notifications --type connections   # 新增关注 notifications
 
 ```
 
+## 本仓库新增功能
+
+本仓库基于 [jackwener/xiaohongshu-cli](https://github.com/jackwener/xiaohongshu-cli)，增加了多账号管理、基于 Chrome 的扫码登录路径和 AI 线索筛选。使用上面的源码安装步骤可运行本仓库版本。
+
+### 多账号与扫码登录
+
+```bash
+xhs --account work login --qrcode  # 为 work 账号扫码登录
+xhs accounts                      # 列出本地账号
+xhs account use work              # 切换当前账号
+xhs --account work status         # 查看指定账号的登录状态
+```
+
+Cookie 和搜索会话按账号存放。扫码登录支持通过 Selenium 启动本机 Chrome，并从镜像下载匹配的 ChromeDriver。
+
+### AI 技术服务线索（可选）
+
+线索模块按关键词搜索最新公开帖子，只把评论数明确为零的帖子送入 AI 分析；评论数缺失或请求失败会进入待核验状态，不会被当作零评论。模块只生成评论草稿和人工审核队列，不会自动评论或私信。
+
+```bash
+xhs leads init
+# 编辑配置并设 enabled: true，然后通过环境变量配置 OpenAI 兼容接口：
+export LEAD_AI_BASE_URL="https://example.com/v1"
+export LEAD_AI_API_KEY="..."
+export LEAD_AI_MODEL="..."
+
+xhs leads run --once
+xhs leads schedule
+xhs leads import "https://www.xiaohongshu.com/explore/...?..."
+xhs leads list --status pending_review --min-score 75
+xhs leads show <post_id>
+xhs leads verify <post_id>  # 联系前重新核验评论数
+xhs leads mark <post_id> --status contacted
+xhs leads stats --days 7
+```
+
+也可在未启用配置时手动执行一次：`xhs leads run --once --force`。
+
 ## Authentication
 
 xiaohongshu-cli supports multiple authentication methods:
@@ -215,7 +253,7 @@ xiaohongshu-cli ships with a [`SKILL.md`](./SKILL.md) that teaches AI agents how
 ### [Skills CLI](https://github.com/vercel-labs/skills) (Recommended)
 
 ```bash
-npx skills add jackwener/xiaohongshu-cli
+npx skills add pyxwzs/xiaohongshu-cli
 ```
 
 | Flag | Description |
@@ -228,7 +266,7 @@ npx skills add jackwener/xiaohongshu-cli
 
 ```bash
 mkdir -p .agents/skills
-git clone git@github.com:jackwener/xiaohongshu-cli.git .agents/skills/xiaohongshu-cli
+git clone https://github.com/pyxwzs/xiaohongshu-cli.git .agents/skills/xiaohongshu-cli
 ```
 
 ### ~~OpenClaw / ClawHub~~ (Deprecated)
@@ -350,7 +388,7 @@ uv tool upgrade xiaohongshu-cli
 从源码安装：
 
 ```bash
-git clone git@github.com:jackwener/xiaohongshu-cli.git
+git clone https://github.com/pyxwzs/xiaohongshu-cli.git
 cd xiaohongshu-cli
 uv sync
 ```
@@ -453,7 +491,7 @@ xiaohongshu-cli 自带 [`SKILL.md`](./SKILL.md)，让 AI Agent 能自动学习�
 ### [Skills CLI](https://github.com/vercel-labs/skills)（推荐）
 
 ```bash
-npx skills add jackwener/xiaohongshu-cli
+npx skills add pyxwzs/xiaohongshu-cli
 ```
 
 | 参数 | 说明 |
@@ -466,7 +504,7 @@ npx skills add jackwener/xiaohongshu-cli
 
 ```bash
 mkdir -p .agents/skills
-git clone git@github.com:jackwener/xiaohongshu-cli.git .agents/skills/xiaohongshu-cli
+git clone https://github.com/pyxwzs/xiaohongshu-cli.git .agents/skills/xiaohongshu-cli
 ```
 
 ### ~~OpenClaw / ClawHub~~（已过时）

@@ -6,7 +6,13 @@ import click
 
 from ..client import XhsClient
 from ..command_normalizers import normalize_xhs_user_payload
-from ..cookies import clear_cookies, get_cookies
+from ..cookies import (
+    clear_cookies,
+    get_active_account,
+    get_cookies,
+    save_account_profile,
+    set_current_account,
+)
 from ..exceptions import XhsApiError
 from ..formatter import (
     console,
@@ -31,14 +37,33 @@ def _is_valid_login(user: dict[str, object]) -> bool:
     return bool(nickname and nickname != "Unknown")
 
 
-def _print_login_success(user: dict[str, object]) -> None:
+def _save_profile(user: dict[str, object]) -> str:
+    """Save display metadata for the active account."""
+    account = get_active_account()
+    save_account_profile({
+        "nickname": str(user.get("nickname") or ""),
+        "red_id": str(user.get("red_id") or ""),
+        "user_id": str(user.get("id") or ""),
+    })
+    return account
+
+
+def _remember_login(user: dict[str, object]) -> str:
+    """Save profile metadata and make this login the current account."""
+    account = _save_profile(user)
+    set_current_account(account)
+    return account
+
+
+def _print_login_success(user: dict[str, object], account: str) -> None:
     """Print a concise login success message."""
-    print_success(f"Logged in as: {user['nickname']} (ID: {user['red_id']})")
+    print_success(f"Logged in as: {user['nickname']} (ID: {user['red_id']}) [account: {account}]")
 
 
 def _print_status_summary(user: dict[str, object]) -> None:
     """Render a short authenticated-user summary."""
     console.print("[bold green]✓ Logged in[/bold green]")
+    console.print(f"  账号: [bold]{get_active_account()}[/bold]")
     console.print(f"  昵称: [bold]{user['nickname']}[/bold]")
     if user["red_id"]:
         console.print(f"  小红书号: {user['red_id']}")
@@ -56,7 +81,7 @@ def _print_status_summary(user: dict[str, object]) -> None:
 )
 @structured_output_options
 @click.option("--qrcode", "use_qrcode", is_flag=True, default=False,
-              help="Login via QR code (scan with Xiaohongshu app)")
+              help="Open the login page in local Chrome and scan the QR code")
 @click.pass_context
 def login(ctx, cookie_source: str | None, as_json: bool, as_yaml: bool, use_qrcode: bool):
     """Log in by extracting cookies from browser, or via QR code."""
@@ -74,17 +99,22 @@ def login(ctx, cookie_source: str | None, as_json: bool, as_yaml: bool, use_qrco
                 info = client.get_self_info()
             user = normalize_xhs_user_payload(info)
 
+            account = _remember_login(user)
             if user["guest"]:
                 # Session not yet propagated; still valid
                 if not _emit_payload(
-                    {"authenticated": True, "user": {"id": user["id"]}},
+                    {"authenticated": True, "account": account, "user": {"id": user["id"]}},
                     as_json=as_json,
                     as_yaml=as_yaml,
                 ):
-                    print_success("Logged in (session saved)")
+                    print_success(f"Logged in (session saved) [account: {account}]")
             else:
-                if not _emit_payload({"authenticated": True, "user": user}, as_json=as_json, as_yaml=as_yaml):
-                    _print_login_success(user)
+                if not _emit_payload(
+                    {"authenticated": True, "account": account, "user": user},
+                    as_json=as_json,
+                    as_yaml=as_yaml,
+                ):
+                    _print_login_success(user, account)
 
         handle_errors(
             _login_with_qrcode,
@@ -119,8 +149,13 @@ def login(ctx, cookie_source: str | None, as_json: bool, as_yaml: bool, use_qrco
                 "(guest or incomplete profile). Try: xhs login --qrcode"
             )
 
-        if not _emit_payload({"authenticated": True, "user": user}, as_json=as_json, as_yaml=as_yaml):
-            _print_login_success(user)
+        account = _remember_login(user)
+        if not _emit_payload(
+            {"authenticated": True, "account": account, "user": user},
+            as_json=as_json,
+            as_yaml=as_yaml,
+        ):
+            _print_login_success(user, account)
 
     handle_errors(
         _login_with_browser,
@@ -138,8 +173,13 @@ def status(ctx, as_json: bool, as_yaml: bool):
     def _show_status() -> None:
         info = run_client_action(ctx, lambda client: client.get_self_info())
         user = normalize_xhs_user_payload(info)
+        account = _save_profile(user)
 
-        if not _emit_payload({"authenticated": True, "user": user}, as_json=as_json, as_yaml=as_yaml):
+        if not _emit_payload(
+            {"authenticated": True, "account": account, "user": user},
+            as_json=as_json,
+            as_yaml=as_yaml,
+        ):
             _print_status_summary(user)
 
     handle_errors(_show_status, as_json=as_json, as_yaml=as_yaml, prefix="Status check failed")
@@ -149,10 +189,11 @@ def status(ctx, as_json: bool, as_yaml: bool):
 @structured_output_options
 @click.pass_context
 def logout(ctx, as_json: bool, as_yaml: bool):
-    """Clear saved cookies and log out."""
+    """Clear saved cookies for the active account and log out."""
+    account = get_active_account()
     clear_cookies()
-    if not _emit_payload({"logged_out": True}, as_json=as_json, as_yaml=as_yaml):
-        print_success("Logged out — cookies cleared")
+    if not _emit_payload({"logged_out": True, "account": account}, as_json=as_json, as_yaml=as_yaml):
+        print_success(f"Logged out — cookies cleared [account: {account}]")
 
 
 @click.command()
@@ -163,8 +204,9 @@ def whoami(ctx, as_json: bool, as_yaml: bool):
     def _show_profile() -> None:
         info = run_client_action(ctx, lambda client: client.get_self_info())
         user = normalize_xhs_user_payload(info)
+        account = _save_profile(user)
 
-        if not _emit_payload({"user": user}, as_json=as_json, as_yaml=as_yaml):
+        if not _emit_payload({"account": account, "user": user}, as_json=as_json, as_yaml=as_yaml):
             render_user_info(info)
 
     handle_errors(_show_profile, as_json=as_json, as_yaml=as_yaml, prefix="Failed to get profile")

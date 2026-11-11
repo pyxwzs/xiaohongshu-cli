@@ -1,7 +1,10 @@
 """CLI entry point for xiaohongshu-cli.
 
 Usage:
-    xhs login / status / logout
+    xhs --account <name> login / status / logout
+    xhs accounts
+    xhs account use <name>
+    xhs account remove <name>
     xhs search <keyword> [--sort popular|latest] [--type video|image] [--page N]
     xhs read <id_or_url> [--xsec-token TOKEN]
     xhs comments <id_or_url>
@@ -31,7 +34,8 @@ import sys
 import click
 
 from . import __version__
-from .commands import auth, creator, interactions, notifications, reading, social
+from .commands import accounts, auth, creator, interactions, leads, notifications, reading, social
+from .cookies import AccountNameError, set_active_account
 
 
 def _fix_windows_encoding() -> None:
@@ -56,11 +60,22 @@ _fix_windows_encoding()
     show_default=True,
     help="Browser to read cookies from (auto = try all installed browsers)",
 )
+@click.option(
+    "--account",
+    "account_name",
+    default=None,
+    help="Account for this command. Omit to use the current account.",
+)
 @click.pass_context
-def cli(ctx, verbose: bool, cookie_source: str):
+def cli(ctx, verbose: bool, cookie_source: str, account_name: str | None):
     """xhs — Xiaohongshu CLI via reverse-engineered API 📕"""
     ctx.ensure_object(dict)
     ctx.obj["cookie_source"] = cookie_source
+    try:
+        set_active_account(account_name)
+    except AccountNameError as exc:
+        raise click.BadParameter(str(exc), param_hint="'--account'") from exc
+    ctx.obj["account"] = account_name
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(name)s %(message)s")
@@ -74,6 +89,9 @@ cli.add_command(auth.login)
 cli.add_command(auth.status)
 cli.add_command(auth.logout)
 cli.add_command(auth.whoami)
+cli.add_command(accounts.accounts)
+cli.add_command(accounts.account)
+cli.add_command(leads.leads)
 
 # ─── Reading commands ────────────────────────────────────────────────────────
 

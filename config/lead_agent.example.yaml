@@ -1,0 +1,21 @@
+lead_agent:
+  enabled: false
+  schedule_minutes: 60
+  max_posts_per_run: 50
+  max_ai_calls_per_run: 20
+  min_score: 75
+  recent_hours: 72
+  require_zero_comments: true
+  require_human_approval: true
+  auto_publish_comment: false
+  auto_send_dm: false
+  keywords:
+    - "有偿求助 Python"
+    - "计算机作业求助"
+    - "找人开发小程序"
+    - "Docker 部署失败"
+  ai:
+    provider: openai_compatible
+    base_url_env: LEAD_AI_BASE_URL
+    api_key_env: LEAD_AI_API_KEY
+    model_env: LEAD_AI_MODEL

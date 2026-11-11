@@ -28,6 +28,9 @@ dependencies = [
     "PyYAML>=6.0",
     "qrcode>=7.0",
     "camoufox>=0.4.11",
+    "selenium>=4.20",
+    "pydantic>=2.7",
+    "APScheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]

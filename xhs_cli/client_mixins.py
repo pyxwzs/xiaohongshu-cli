@@ -13,12 +13,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from .constants import CREATOR_HOST, HOME_URL, UPLOAD_HOST, USER_AGENT
+from .constants import CREATOR_HOST, HOME_URL, SEARCH_SESSION_FILE, UPLOAD_HOST, USER_AGENT
 from .cookies import (
     cache_note_context,
     cookies_to_string,
+    get_account_dir,
     get_cached_note_context,
-    get_config_dir,
     invalidate_note_context,
 )
 from .exceptions import NeedVerifyError, UnsupportedOperationError, XhsApiError
@@ -62,7 +62,7 @@ def _search_session_key(keyword: str, sort: str, note_type: int) -> tuple[str, s
 
 
 def _search_session_path() -> Path:
-    return get_config_dir() / "search_sessions.json"
+    return get_account_dir() / SEARCH_SESSION_FILE
 
 
 def _serialize_search_session_key(key: tuple[str, str, int]) -> str:
@@ -110,6 +110,7 @@ def _load_search_session_cache_from_disk(path: Path) -> OrderedDict[tuple[str, s
 
 
 def _save_search_session_cache(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = OrderedDict(
         (
             _serialize_search_session_key(key),

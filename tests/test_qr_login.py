@@ -179,7 +179,7 @@ def test_qrcode_login_prefers_browser_assisted_backend(monkeypatch):
     saved = []
 
     monkeypatch.setattr(
-        "xhs_cli.qr_login._browser_assisted_qrcode_login",
+        "xhs_cli.qr_login._selenium_qrcode_login",
         lambda **kwargs: {
             "a1": "a1-browser",
             "webId": "webid-browser",
@@ -198,8 +198,8 @@ def test_qrcode_login_prefers_browser_assisted_backend(monkeypatch):
 
 def test_qrcode_login_falls_back_when_browser_backend_unavailable(monkeypatch):
     monkeypatch.setattr(
-        "xhs_cli.qr_login._browser_assisted_qrcode_login",
-        lambda **kwargs: (_ for _ in ()).throw(BrowserQrLoginUnavailable("missing camoufox")),
+        "xhs_cli.qr_login._selenium_qrcode_login",
+        lambda **kwargs: (_ for _ in ()).throw(BrowserQrLoginUnavailable("missing selenium")),
     )
     monkeypatch.setattr(
         "xhs_cli.qr_login._http_qrcode_login",
@@ -217,6 +217,17 @@ def test_qrcode_login_falls_back_when_browser_backend_unavailable(monkeypatch):
         "webId": "webid-http",
         "web_session": "http-session",
     }
+
+
+def test_select_chromedriver_version_prefers_not_newer_than_chrome():
+    from xhs_cli.qr_login import _select_chromedriver_version
+
+    chosen = _select_chromedriver_version(
+        "155.0.8059.80",
+        ["155.0.8059.79", "155.0.8059.84", "154.0.1.0", "156.0.0.0"],
+    )
+
+    assert chosen == "155.0.8059.79"
 
 
 def test_normalize_browser_cookies_uses_allowlist():

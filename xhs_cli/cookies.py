@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,7 +15,17 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from .constants import CONFIG_DIR_NAME, COOKIE_FILE, INDEX_CACHE_FILE, TOKEN_CACHE_FILE
+from .constants import (
+    ACCOUNTS_DIR_NAME,
+    CONFIG_DIR_NAME,
+    COOKIE_FILE,
+    CURRENT_ACCOUNT_FILE,
+    DEFAULT_ACCOUNT_NAME,
+    INDEX_CACHE_FILE,
+    PROFILE_FILE,
+    SEARCH_SESSION_FILE,
+    TOKEN_CACHE_FILE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +36,69 @@ _TOKEN_CACHE_LOCK = threading.RLock()
 _TOKEN_CACHE_MEMORY: OrderedDict[str, dict[str, Any]] | None = None
 _TOKEN_CACHE_PATH: Path | None = None
 NOTE_CONTEXT_TTL_SECONDS = 86400
+_ACTIVE_ACCOUNT: contextvars.ContextVar[str | None] = contextvars.ContextVar("xhs_account", default=None)
+_LEGACY_ACCOUNT_FILES = (
+    COOKIE_FILE,
+    TOKEN_CACHE_FILE,
+    INDEX_CACHE_FILE,
+    SEARCH_SESSION_FILE,
+)
 
+
+class AccountNameError(ValueError):
+    """Raised when an account name cannot be used as a directory name."""
+
+
+def validate_account_name(name: str) -> str:
+    """Return a filesystem-safe account name."""
+    cleaned = name.strip()
+    if (
+        not cleaned
+        or cleaned in {".", ".."}
+        or len(cleaned) > 64
+        or not cleaned[0].isalnum()
+        or any(not (char.isalnum() or char in "_-") for char in cleaned)
+    ):
+        raise AccountNameError(
+            "Account name must be 1-64 characters of letters, digits, '_' or '-', "
+            "and start with a letter or digit."
+        )
+    return cleaned
+
+
+def set_active_account(name: str | None) -> None:
+    """Select the account used by this process. ``None`` falls back to the saved current account."""
+    if not name:
+        _ACTIVE_ACCOUNT.set(None)
+        return
+    _ACTIVE_ACCOUNT.set(validate_account_name(name))
+
+
+def get_current_account_name() -> str:
+    """Return the persisted current account, or ``default``."""
+    path = get_config_dir() / CURRENT_ACCOUNT_FILE
+    if path.exists():
+        try:
+            return validate_account_name(path.read_text().strip())
+        except (OSError, AccountNameError):
+            logger.debug("Ignoring invalid current account name in %s", path)
+    return DEFAULT_ACCOUNT_NAME
+
+
+def set_current_account(name: str) -> None:
+    """Persist which account later commands use when ``--account`` is omitted."""
+    cleaned = validate_account_name(name)
+    path = get_config_dir() / CURRENT_ACCOUNT_FILE
+    path.write_text(cleaned + "\n")
+    path.chmod(0o600)
+
+
+def get_active_account() -> str:
+    """Return the account selected for this process."""
+    selected = _ACTIVE_ACCOUNT.get()
+    if selected:
+        return selected
+    return get_current_account_name()
 
 
 def get_config_dir() -> Path:
@@ -34,19 +108,141 @@ def get_config_dir() -> Path:
     return config_dir
 
 
+def _migrate_legacy_account_files(account: str) -> None:
+    """Move pre-multi-account files into the default account directory once."""
+    if account != DEFAULT_ACCOUNT_NAME:
+        return
+    config_dir = get_config_dir()
+    dest_dir = config_dir / ACCOUNTS_DIR_NAME / account
+    for filename in _LEGACY_ACCOUNT_FILES:
+        src = config_dir / filename
+        dest = dest_dir / filename
+        if src.is_file() and not dest.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+            logger.debug("Migrated %s to %s", src, dest)
+
+
+def get_account_dir(name: str | None = None) -> Path:
+    """Return the directory that stores one account's cookies and caches."""
+    account = validate_account_name(name) if name else get_active_account()
+    _migrate_legacy_account_files(account)
+    path = get_config_dir() / ACCOUNTS_DIR_NAME / account
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_cookie_path() -> Path:
-    """Get cookie file path."""
-    return get_config_dir() / COOKIE_FILE
+    """Get cookie file path for the active account."""
+    return get_account_dir() / COOKIE_FILE
 
 
 def get_token_cache_path() -> Path:
-    """Get xsec token cache file path."""
-    return get_config_dir() / TOKEN_CACHE_FILE
+    """Get xsec token cache file path for the active account."""
+    return get_account_dir() / TOKEN_CACHE_FILE
 
 
 def get_index_cache_path() -> Path:
-    """Get note index cache file path."""
-    return get_config_dir() / INDEX_CACHE_FILE
+    """Get note index cache file path for the active account."""
+    return get_account_dir() / INDEX_CACHE_FILE
+
+
+def _ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Failed to load %s: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _account_cookie_path(name: str) -> Path:
+    return get_config_dir() / ACCOUNTS_DIR_NAME / name / COOKIE_FILE
+
+
+def _account_profile_path(name: str) -> Path:
+    return get_config_dir() / ACCOUNTS_DIR_NAME / name / PROFILE_FILE
+
+
+def save_account_profile(profile: dict[str, str], name: str | None = None) -> None:
+    """Store display metadata for an account. Cookies stay in ``cookies.json``."""
+    path = get_account_dir(name) / PROFILE_FILE
+    _ensure_parent(path)
+    path.write_text(json.dumps(profile, indent=2, ensure_ascii=False))
+    path.chmod(0o600)
+
+
+def list_account_records() -> list[dict[str, Any]]:
+    """List known accounts and whether each one still has a saved session."""
+    _migrate_legacy_account_files(DEFAULT_ACCOUNT_NAME)
+    current = get_current_account_name()
+    root = get_config_dir() / ACCOUNTS_DIR_NAME
+    names = set()
+    if root.is_dir():
+        names.update(
+            child.name
+            for child in root.iterdir()
+            if child.is_dir() and _is_existing_account_name(child.name)
+        )
+    names.add(current)
+
+    records = []
+    for name in names:
+        profile = _load_json_object(_account_profile_path(name)) or {}
+        cookies = _load_json_object(_account_cookie_path(name)) or {}
+        records.append({
+            "name": name,
+            "current": name == current,
+            "authenticated": bool(cookies.get("a1")),
+            "nickname": str(profile.get("nickname", "")),
+            "red_id": str(profile.get("red_id", "")),
+            "user_id": str(profile.get("user_id", "")),
+        })
+    records.sort(key=lambda item: (not item["current"], item["name"]))
+    return records
+
+
+def _is_existing_account_name(name: str) -> bool:
+    try:
+        validate_account_name(name)
+    except AccountNameError:
+        return False
+    return True
+
+
+def use_account(name: str) -> str:
+    """Switch the persisted current account."""
+    cleaned = validate_account_name(name)
+    account_dir = get_config_dir() / ACCOUNTS_DIR_NAME / cleaned
+    if not account_dir.is_dir():
+        raise AccountNameError(
+            f"Account {cleaned!r} does not exist. Log in with: xhs --account {cleaned} login"
+        )
+    set_current_account(cleaned)
+    return cleaned
+
+
+def remove_account(name: str) -> str:
+    """Delete an account directory and move the current pointer if needed."""
+    cleaned = validate_account_name(name)
+    account_dir = get_config_dir() / ACCOUNTS_DIR_NAME / cleaned
+    if not account_dir.is_dir():
+        raise AccountNameError(f"Account {cleaned!r} does not exist.")
+    shutil.rmtree(account_dir)
+    if get_current_account_name() == cleaned:
+        remaining = [
+            record["name"]
+            for record in list_account_records()
+            if record["name"] != cleaned and (get_config_dir() / ACCOUNTS_DIR_NAME / record["name"]).is_dir()
+        ]
+        set_current_account(remaining[0] if remaining else DEFAULT_ACCOUNT_NAME)
+    return cleaned
 
 
 def load_saved_cookies() -> dict[str, str] | None:
@@ -67,6 +263,7 @@ def load_saved_cookies() -> dict[str, str] | None:
 def save_cookies(cookies: dict[str, str]) -> None:
     """Save cookies to local storage with restricted permissions and TTL timestamp."""
     cookie_path = get_cookie_path()
+    _ensure_parent(cookie_path)
     payload = {**cookies, "saved_at": time.time()}
     cookie_path.write_text(json.dumps(payload, indent=2))
     cookie_path.chmod(0o600)
@@ -174,6 +371,7 @@ def save_token_cache(cache: dict[str, dict[str, Any]]) -> None:
     ))
 
     with _TOKEN_CACHE_LOCK:
+        _ensure_parent(cache_path)
         cache_path.write_text(json.dumps(normalized, indent=2))
         cache_path.chmod(0o600)
         _TOKEN_CACHE_MEMORY = normalized
@@ -268,6 +466,7 @@ def save_note_index(items: list[dict[str, str]]) -> None:
         for entry in (_normalize_index_entry(item) for item in items)
         if entry
     ]
+    _ensure_parent(path)
     path.write_text(json.dumps(normalized, indent=2, ensure_ascii=False))
     path.chmod(0o600)
     logger.debug("Saved note index with %d entries", len(normalized))
